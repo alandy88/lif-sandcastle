@@ -36,6 +36,7 @@ export { ensureTaskList, runChecklistLoop } from "./lib/task-loop.mts";
 export type { ChecklistLoopDeps, ChecklistLoopResult } from "./lib/task-loop.mts";
 
 export {
+  agents,
   DEFAULT_PROFILE_SENTINEL,
   describeRun,
   forwardedEnvKeys,
@@ -44,8 +45,10 @@ export {
   PROFILE_LABELS,
   profiles,
   resolvePhases,
+  routes,
 } from "./lib/profiles.mts";
 export type {
+  AgentName,
   Effort,
   ModelProfile,
   Phase,
@@ -53,6 +56,7 @@ export type {
   ProfileResolutionInput,
   Provider,
   ResolvedPhases,
+  RouteName,
 } from "./lib/profiles.mts";
 
 export {

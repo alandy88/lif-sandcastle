@@ -81,7 +81,10 @@ test("an unknown profile is rejected before the first sandbox is built", async (
 
 test("a model override without a named profile is rejected", async () => {
   const deps = makeDeps();
-  await assert.rejects(main({ iterations: 1, model: "gpt-5.6" }, deps), /requires a named profile/);
+  await assert.rejects(
+    main({ iterations: 1, model: "gpt-5.6" }, deps),
+    /requires a single-agent route/,
+  );
   assert.deepEqual(deps.iterations, []);
 });
 

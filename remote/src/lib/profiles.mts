@@ -10,7 +10,8 @@ export type ModelProfile = {
   effort?: Effort;
 };
 
-export const profiles = {
+/** The agents a run can use — provider + model + effort, each id defined once. */
+export const agents = {
   claude: {
     provider: "claude",
     model: "claude-opus-5",
@@ -23,24 +24,37 @@ export const profiles = {
   },
 } as const satisfies Record<string, ModelProfile>;
 
+export type AgentName = keyof typeof agents;
+
 export type Phase = "plan" | "task" | "review";
 
-/** Opus plans/reviews and Codex builds unless a named profile is forced. */
-export const phaseProfiles = {
-  plan: { provider: "claude", model: "claude-opus-5", effort: "medium" },
-  task: { provider: "codex", model: "gpt-5.6-sol", effort: "medium" },
-  review: { provider: "claude", model: "claude-opus-5", effort: "medium" },
-} as const satisfies Record<Phase, ModelProfile>;
+/**
+ * Which agent runs which phase. A named agent's route is the degenerate case
+ * where all three phases share it; `mixed` (the default) has Opus plan and
+ * review while Codex builds.
+ */
+export const routes = {
+  mixed: { plan: "claude", task: "gpt", review: "claude" },
+  claude: { plan: "claude", task: "claude", review: "claude" },
+  gpt: { plan: "gpt", task: "gpt", review: "gpt" },
+} as const satisfies Record<string, Record<Phase, AgentName>>;
 
-export type ProfileName = keyof typeof profiles;
+export type RouteName = keyof typeof routes;
 
+/** Dispatch value meaning "no forced route — fall through to labels/default". */
 export const DEFAULT_PROFILE_SENTINEL = "default" as const;
+
+// Compatibility aliases predating the agents/routes split. Derived, so model
+// ids stay single-sourced; a later release can drop them.
+export const profiles = agents;
+export type ProfileName = AgentName;
 export const MIXED_PROFILE_NAME = "mixed" as const;
+export const phaseProfiles = materialize(routes.mixed);
 
 export const PROFILE_LABELS = {
   claude: "agent:claude",
   gpt: "agent:gpt",
-} as const satisfies Record<ProfileName, string>;
+} as const satisfies Record<AgentName, string>;
 
 const NON_ROUTING_AGENT_LABELS = new Set(["agent:in-progress"]);
 
@@ -51,30 +65,30 @@ export type ProfileResolutionInput = {
   modelOverride?: string;
 };
 
-type ResolvedProfile = ModelProfile & {
-  name: ProfileName;
-};
+function materialize(route: Record<Phase, AgentName>): Record<Phase, ModelProfile> {
+  return { plan: agents[route.plan], task: agents[route.task], review: agents[route.review] };
+}
 
-function profileName(value: string, source: string): ProfileName {
+function routeName(value: string, source: string): RouteName {
   const name = value.trim();
-  if (Object.prototype.hasOwnProperty.call(profiles, name)) return name as ProfileName;
+  if (Object.prototype.hasOwnProperty.call(routes, name)) return name as RouteName;
 
   throw new Error(
-    `Unknown ${source} "${value}". Available profiles: ${Object.keys(profiles).join(", ")}`,
+    `Unknown ${source} "${value}". Available profiles: ${Object.keys(routes).join(", ")}`,
   );
 }
 
 function profileLabels(labels: readonly string[]): {
-  selected: ProfileName[];
+  selected: AgentName[];
   unknown: string[];
 } {
-  const selected = new Set<ProfileName>();
+  const selected = new Set<AgentName>();
   const unknown: string[] = [];
 
   for (const label of labels) {
     if (!label.startsWith("agent:") || NON_ROUTING_AGENT_LABELS.has(label)) continue;
 
-    const match = (Object.entries(PROFILE_LABELS) as [ProfileName, string][]).find(
+    const match = (Object.entries(PROFILE_LABELS) as [AgentName, string][]).find(
       ([, profileLabel]) => profileLabel === label,
     );
     if (match) selected.add(match[0]);
@@ -89,17 +103,12 @@ const MODEL_OVERRIDE_PATTERNS: Record<Provider, RegExp> = {
   codex: /^(?:gpt-|o\d|codex-)[\w.-]+$/,
 };
 
-/**
- * Resolve the optional named profile forced by dispatch, labels, or repository
- * default. `undefined` means use the mixed phase map. Dispatch `mixed`
- * explicitly selects that map and wins over labels/defaults.
- */
-function resolveForcedName(input: ProfileResolutionInput): ProfileName | undefined {
+/** Resolve the route forced by dispatch, labels, or repository default. */
+function resolveRouteName(input: ProfileResolutionInput): RouteName {
   const dispatch = input.dispatchProfile?.trim();
-  if (dispatch && dispatch !== DEFAULT_PROFILE_SENTINEL && dispatch !== MIXED_PROFILE_NAME) {
-    return profileName(dispatch, "workflow profile");
+  if (dispatch && dispatch !== DEFAULT_PROFILE_SENTINEL) {
+    return routeName(dispatch, "workflow profile");
   }
-  if (dispatch === MIXED_PROFILE_NAME) return undefined;
 
   const fromLabels = profileLabels(input.labels ?? []);
   if (fromLabels.unknown.length > 0) {
@@ -115,42 +124,44 @@ function resolveForcedName(input: ProfileResolutionInput): ProfileName | undefin
   if (fromLabels.selected[0]) return fromLabels.selected[0];
 
   const defaultName = input.defaultProfile?.trim();
-  if (!defaultName || defaultName === MIXED_PROFILE_NAME) return undefined;
-  return profileName(defaultName, "default profile");
-}
-
-function resolvedNamedProfile(name: ProfileName, modelOverride?: string): ResolvedProfile {
-  const base = profiles[name];
-  const override = modelOverride?.trim();
-  if (override && !MODEL_OVERRIDE_PATTERNS[base.provider].test(override)) {
-    throw new Error(
-      `Model override "${override}" does not look like a ${base.provider} model id ` +
-        `(expected ${MODEL_OVERRIDE_PATTERNS[base.provider]})`,
-    );
-  }
-  return { name, ...base, model: override || base.model };
+  if (!defaultName) return "mixed";
+  return routeName(defaultName, "default profile");
 }
 
 export type ResolvedPhases = {
-  name: ProfileName | typeof MIXED_PROFILE_NAME;
+  name: RouteName;
   phases: Record<Phase, ModelProfile>;
 };
 
 /** Resolve dispatch → label → default → mixed, once for all three phases. */
 export function resolvePhases(input: ProfileResolutionInput = {}): ResolvedPhases {
-  const forced = resolveForcedName(input);
-  if (forced) {
-    const single = resolvedNamedProfile(forced, input.modelOverride);
-    return { name: single.name, phases: { plan: single, task: single, review: single } };
-  }
+  const name = resolveRouteName(input);
+  const route = routes[name];
 
-  if (input.modelOverride?.trim()) {
+  const override = input.modelOverride?.trim();
+  if (!override) return { name, phases: materialize(route) };
+
+  // An override needs a single provider to validate the id against, so the
+  // route must use exactly one distinct agent.
+  const distinct = [...new Set<AgentName>(Object.values(route))];
+  const only = distinct.length === 1 ? distinct[0] : undefined;
+  if (!only) {
     throw new Error(
-      `Model override "${input.modelOverride.trim()}" requires a named profile ` +
-        `(the mixed default runs different models per phase)`,
+      `Model override "${override}" requires a single-agent route ` +
+        `("${name}" runs different models per phase)`,
     );
   }
-  return { name: MIXED_PROFILE_NAME, phases: phaseProfiles };
+
+  const base = agents[only];
+  if (!MODEL_OVERRIDE_PATTERNS[base.provider].test(override)) {
+    throw new Error(
+      `Model override "${override}" does not look like a ${base.provider} model id ` +
+        `(expected ${MODEL_OVERRIDE_PATTERNS[base.provider]})`,
+    );
+  }
+
+  const forced = { ...base, model: override };
+  return { name, phases: { plan: forced, task: forced, review: forced } };
 }
 
 /**
@@ -162,10 +173,11 @@ export function describeRun(
   run: ResolvedPhases,
   phases: readonly Phase[] = ["plan", "task", "review"],
 ): string {
-  if (run.name !== MIXED_PROFILE_NAME) return `${run.name} → ${run.phases.task.model}`;
+  const singleAgent = new Set(Object.values(routes[run.name])).size === 1;
+  if (singleAgent) return `${run.name} → ${run.phases.task.model}`;
   const labels: Record<Phase, string> = { plan: "plan", task: "tasks", review: "review" };
   const parts = phases.map((phase) => `${labels[phase]} ${run.phases[phase].model}`);
-  return `mixed → ${parts.join(", ")}`;
+  return `${run.name} → ${parts.join(", ")}`;
 }
 
 /**

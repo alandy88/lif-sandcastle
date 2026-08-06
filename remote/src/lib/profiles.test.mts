@@ -1,12 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  agents,
   describeRun,
   forwardedEnvKeys,
   phaseProfiles,
   profiles,
   resolvePhases,
+  routes,
 } from "./profiles.mts";
+
+test("compatibility aliases derive from agents and routes", () => {
+  assert.equal(profiles, agents);
+  assert.deepEqual(phaseProfiles, {
+    plan: agents[routes.mixed.plan],
+    task: agents[routes.mixed.task],
+    review: agents[routes.mixed.review],
+  });
+});
 
 test("describeRun names only the phases the lifecycle runs", () => {
   const mixed = resolvePhases({});
@@ -106,7 +117,10 @@ test("resolvePhases: label routing errors fail closed", () => {
 });
 
 test("resolvePhases: a model override on a mixed run is rejected", () => {
-  assert.throws(() => resolvePhases({ modelOverride: "gpt-5.6-sol" }), /requires a named profile/);
+  assert.throws(
+    () => resolvePhases({ modelOverride: "gpt-5.6-sol" }),
+    /requires a single-agent route/,
+  );
 });
 
 test("resolvePhases: a model override applies to a forced single profile", () => {
